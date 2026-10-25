@@ -78,7 +78,7 @@ LogLevel warn
 
 `Listen 127.0.0.1:631` 让 CUPS 只对本机开放，避免局域网里出现第二个打印机条目。改完重启 cupsd。
 
-3. 安装 APK：
+3. 从 [Releases](https://github.com/heishanmao/AirPrint-Bridge-OpenWrt/releases) 下载 APK，上传到路由器后安装：
 
 ```sh
 apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r10.apk
