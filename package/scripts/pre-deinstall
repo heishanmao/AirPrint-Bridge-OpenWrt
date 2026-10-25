@@ -1,0 +1,3 @@
+#!/bin/sh
+/usr/sbin/airprint-setup deinstall
+exit 0

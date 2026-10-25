@@ -1,0 +1,302 @@
+#!/usr/bin/python3
+"""Install/upgrade helper: keep CUPS queue, Avahi record and service in sync with UCI."""
+import glob
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/lib/airprint")
+import common
+
+PPD = "/usr/share/airprint/EPSON_L3250.ppd"
+AVAHI = "/usr/sbin/airprint-avahi"
+INIT = "/etc/init.d/airprint"
+CUPS_INIT = "/etc/init.d/cupsd"
+LPSTAT = "/usr/bin/lpstat"
+LPADMIN = "/usr/sbin/lpadmin"
+URF_TYPE = "image/urf urf 0 0 0x55,0x4e,0x49,0x52,0x41,0x53,0x54,0x00"
+URF_CONV = "image/urf application/vnd.cups-raster 100 urftopwg"
+
+
+def run(cmd, timeout=15):
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(cmd, 127, b"", str(exc).encode())
+
+
+def wait_cups(seconds=10):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        ok, _ = common.tcp_check("127.0.0.1", 631, 1.0)
+        if ok:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def ensure_mime():
+    changed = False
+    for path, line, kind in (("/etc/cups/mime.types", URF_TYPE, "type"),
+                             ("/etc/cups/mime.convs", URF_CONV, "conv")):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            print("CUPS MIME file missing: %s" % path, file=sys.stderr)
+            continue
+        present = False
+        for entry in text.splitlines():
+            fields = entry.split()
+            if kind == "type" and fields and fields[0] == "image/urf":
+                present = True
+                break
+            if kind == "conv" and " ".join(fields) == URF_CONV:
+                present = True
+                break
+        if present:
+            continue
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                if text and not text.endswith("\n"):
+                    f.write("\n")
+                f.write(line + "\n")
+            changed = True
+        except OSError as exc:
+            print("cannot update %s: %s" % (path, exc), file=sys.stderr)
+    if changed:
+        if os.path.exists(CUPS_INIT):
+            run([CUPS_INIT, "reload"])
+        else:
+            try:
+                pid = subprocess.run(["pidof", "cupsd"], stdout=subprocess.PIPE, timeout=3).stdout.split()
+                if pid:
+                    subprocess.run(["kill", "-HUP", pid[0].decode()], timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        print("registered image/urf with CUPS")
+
+
+def queue_uri(queue):
+    result = run([LPSTAT, "-v", queue], timeout=8)
+    text = result.stdout.decode("utf-8", "replace")
+    prefix = "device for %s: " % queue
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return ""
+
+
+def ensure_ppd(queue):
+    if os.path.exists("/etc/cups/ppd/%s.ppd" % queue) or not os.path.exists(PPD):
+        return
+    result = run([LPADMIN, "-p", queue, "-P", PPD])
+    if result.returncode != 0:
+        print(result.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
+
+
+def sync_cups():
+    cfg = common.load_config()
+    queue = cfg.get("queue_name") or "EPSON_L3250"
+    uri = common.parse_uri(cfg.get("printer_uri") or "")["uri"]
+    if not wait_cups():
+        print("CUPS is not reachable on 127.0.0.1:631", file=sys.stderr)
+        return 1
+    ensure_mime()
+    exists = run([LPSTAT, "-p", queue], timeout=8).returncode == 0
+    if not exists:
+        if not os.path.exists(PPD):
+            print("PPD missing: %s" % PPD, file=sys.stderr)
+            return 1
+        result = run([LPADMIN, "-p", queue, "-E", "-v", uri, "-P", PPD])
+        if result.returncode != 0:
+            print(result.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
+            return 1
+        print("created queue %s -> %s" % (queue, uri))
+        return 0
+    current = queue_uri(queue)
+    if current != uri:
+        result = run([LPADMIN, "-p", queue, "-v", uri])
+        if result.returncode != 0:
+            print(result.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
+            return 1
+        print("queue %s device %s -> %s" % (queue, current or "?", uri))
+    ensure_ppd(queue)
+    return 0
+
+
+def apply():
+    cfg = common.load_config()
+    if str(cfg.get("enabled", "1")).strip() == "0":
+        run([INIT, "stop"], timeout=20)
+        run([AVAHI, "remove"], timeout=20)
+        print("airprint disabled; Avahi record removed")
+        return 0
+    avahi = run([AVAHI, "sync"], timeout=20)
+    if avahi.returncode != 0:
+        print("avahi sync failed", file=sys.stderr)
+    rc = sync_cups()
+    run([INIT, "restart"], timeout=20)
+    print("applied; LuCI: http://%s/cgi-bin/luci/admin/services/airprint" % cfg_ip())
+    return rc
+
+
+def cfg_ip():
+    cfg = common.load_config()
+    value = (cfg.get("lan_ip") or "").strip()
+    if value:
+        return value.split("/")[0]
+    try:
+        return subprocess.check_output(["uci", "-q", "get", "network.lan.ipaddr"],
+                                       stderr=subprocess.DEVNULL, timeout=3).decode().strip().split("/")[0]
+    except (OSError, subprocess.SubprocessError):
+        return "192.168.31.1"
+
+
+def replace_apk_new(path):
+    new = path + ".apk-new"
+    if not os.path.exists(new):
+        return
+    try:
+        if os.path.exists(path):
+            os.replace(path, path + ".pre-airprint-bridge")
+        os.replace(new, path)
+        print("replaced %s with package version" % path)
+    except OSError as exc:
+        print("cannot replace %s: %s" % (path, exc), file=sys.stderr)
+
+
+def chown_root():
+    paths = ("/usr/sbin/airprint-avahi", "/usr/sbin/airprint-proxy",
+             "/usr/sbin/airprint-setup", "/usr/sbin/airprint-status",
+             "/usr/lib/airprint", "/usr/lib/cups/backend/ipps",
+             "/usr/lib/cups/filter/urftopwg", "/usr/lib/cups/filter/urftopwg.real",
+             "/usr/share/airprint", "/usr/share/luci/menu.d/luci-app-airprint.json",
+             "/usr/share/rpcd/acl.d/luci-app-airprint.json",
+             "/www/luci-static/resources/view/airprint",
+             INIT, "/etc/uci-defaults/90-airprint")
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        targets = [path]
+        if os.path.isdir(path):
+            targets += [os.path.join(root, name)
+                        for root, _, files in os.walk(path) for name in files]
+        for target in targets:
+            try:
+                os.chown(target, 0, 0)
+                os.chmod(target, 0o755 if os.access(target, os.X_OK) else 0o644)
+            except OSError:
+                pass
+    for target in (INIT, "/etc/uci-defaults/90-airprint"):
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+
+
+def postinstall():
+    defaults = "/etc/uci-defaults/90-airprint"
+    if os.path.exists(defaults):
+        subprocess.call(["/bin/sh", defaults])
+    if os.path.exists(INIT):
+        run([INIT, "stop"])
+        run([INIT, "disable"])
+    replace_apk_new(INIT)
+    replace_apk_new("/etc/uci-defaults/90-airprint")
+    chown_root()
+    old = "/etc/avahi/services/EPSON_L3250.service"
+    if os.path.exists(old):
+        try:
+            os.replace(old, old + ".bak-airprint")
+        except OSError as exc:
+            print("cannot archive old Avahi record: %s" % exc, file=sys.stderr)
+    old_init = "/etc/init.d/airprint_cap"
+    if os.path.exists(old_init):
+        run([old_init, "stop"])
+        run([old_init, "disable"])
+    common.ensure_dir("/var/log/airprint", 0o755)
+    common.ensure_dir("/tmp/airprint", 0o777)
+    common.ensure_dir("/tmp/airprint/urf", 0o777)
+    common.ensure_dir("/overlay/ipps_tmp", 0o777)
+    for cache in glob.glob("/tmp/luci-indexcache*"):
+        try:
+            os.unlink(cache)
+        except OSError:
+            pass
+    if os.path.exists("/etc/init.d/rpcd"):
+        run(["/etc/init.d/rpcd", "reload"])
+    run([INIT, "enable"])
+    return apply()
+
+
+def deinstall():
+    run([INIT, "stop"])
+    run([INIT, "disable"])
+    run([AVAHI, "remove"])
+    print("config, job history and CUPS queue were kept")
+    return 0
+
+
+def check():
+    cfg = common.load_config()
+    queue = cfg.get("queue_name") or "EPSON_L3250"
+    printer = common.parse_uri(cfg.get("printer_uri") or "")
+    items = []
+
+    def add(ok, text):
+        items.append((ok, text))
+
+    for binary in (LPSTAT, LPADMIN, "/usr/sbin/cupsenable", "/usr/sbin/cupsaccept",
+                   "/usr/sbin/airprint-avahi", "/usr/lib/cups/filter/urftopwg.real"):
+        add(os.path.exists(binary), "binary %s" % binary)
+    for module in ("ssl", "json", "urllib.request"):
+        try:
+            __import__(module)
+            add(True, "python module %s" % module)
+        except ImportError:
+            add(False, "python module %s" % module)
+    add(common.tcp_check("127.0.0.1", 631, 1.0)[0], "CUPS 127.0.0.1:631")
+    reachable, ms = common.tcp_check(printer["host"], printer["port"], 2.0)
+    add(reachable, "printer %s:%d%s" % (printer["host"], printer["port"], " (%d ms)" % ms if reachable else ""))
+    add(bool(queue_uri(queue)), "CUPS queue %s" % queue)
+    add(os.path.exists("/etc/avahi/services/airprint.service"), "Avahi record")
+    add(os.path.exists("/var/run/avahi-daemon/pid"), "avahi-daemon")
+    for ok, text in items:
+        print("%s %s" % ("[OK]  " if ok else "[FAIL]", text))
+    return 0 if all(ok for ok, _ in items) else 1
+
+
+def cancel_jobs():
+    cfg = common.load_config()
+    queue = cfg.get("queue_name") or "EPSON_L3250"
+    res = run(["/usr/bin/cancel", "-a", queue], timeout=20)
+    out = (res.stdout + res.stderr).decode("utf-8", "replace").strip()
+    print(out or "no active jobs")
+    return 0 if res.returncode == 0 else 1
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "apply"
+    if action == "apply":
+        return apply()
+    if action == "sync-cups":
+        return sync_cups()
+    if action == "check":
+        return check()
+    if action == "cancel":
+        return cancel_jobs()
+    if action == "status":
+        return subprocess.call(["/usr/sbin/airprint-status"] + sys.argv[2:])
+    if action == "postinstall":
+        return postinstall()
+    if action == "deinstall":
+        return deinstall()
+    print("usage: airprint-setup {apply|sync-cups|check|cancel|status|postinstall|deinstall}",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

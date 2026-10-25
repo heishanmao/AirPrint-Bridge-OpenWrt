@@ -1,0 +1,18 @@
+{
+	"luci-app-airprint": {
+		"description": "AirPrint bridge status and configuration",
+		"read": {
+			"file": {
+				"/usr/sbin/airprint-status": [ "exec" ],
+				"/usr/sbin/airprint-setup": [ "exec" ]
+			},
+			"uci": [ "airprint" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/airprint-setup": [ "exec" ]
+			},
+			"uci": [ "airprint" ]
+		}
+	}
+}

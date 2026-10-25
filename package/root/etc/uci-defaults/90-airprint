@@ -1,0 +1,25 @@
+#!/bin/sh
+[ -f /etc/config/airprint ] && exit 0
+cat > /etc/config/airprint <<'EOF'
+config airprint 'main'
+	option enabled '1'
+	option listen_port '6310'
+	option cups_host '127.0.0.1'
+	option cups_port '631'
+	option queue_name 'EPSON_L3250'
+	option printer_uri 'ipps://192.168.31.6:631/ipp/print'
+	option service_name 'EPSON L3250 Series'
+	option service_uuid '0ea66e10-844a-3a74-4c05-5b17c7daffa8'
+	option dpi '300'
+	option note 'AirPrint 300dpi via CUPS capability proxy'
+	option lan_ip ''
+	option auto_recover '1'
+	option offline_guard '1'
+	option notify_url ''
+	option notify_kind 'auto'
+	option notify_events 'start,complete,error,recover'
+	option history_file '/var/log/airprint/jobs.jsonl'
+	option history_max '200'
+	option debug '0'
+EOF
+exit 0

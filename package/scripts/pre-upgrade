@@ -1,0 +1,8 @@
+#!/bin/sh
+queue="$(uci -q get airprint.main.queue_name 2>/dev/null)"
+[ -n "$queue" ] || queue="EPSON_L3250"
+if command -v lpstat >/dev/null 2>&1 && lpstat -o "$queue" 2>/dev/null | grep -q .; then
+	echo "airprint-bridge: active print jobs on $queue, upgrade postponed" >&2
+	exit 1
+fi
+exit 0

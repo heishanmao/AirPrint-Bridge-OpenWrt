@@ -1,0 +1,105 @@
+#!/usr/bin/python3
+"""CUPS filter wrapper: keep a bounded URF sample, then run urftopwg.real."""
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/lib/airprint")
+import common
+
+REAL = "/usr/lib/cups/filter/urftopwg.real"
+DIR = "/tmp/airprint/urf"
+LOG = "/tmp/airprint/urf.log"
+CAP = 4 * 1024 * 1024
+KEEP = 2
+
+
+def log(msg):
+    common.log_line(LOG, msg)
+
+
+def main():
+    args = sys.argv[1:]
+    job = args[0] if args else "0"
+    infile = args[5] if len(args) > 5 and args[5] not in ("", "-") else None
+
+    path = os.path.join(DIR, "raw-%s-%d.urf" % (job, int(time.time())))
+    cap = None
+    try:
+        common.ensure_dir(DIR)
+        cap = open(path, "wb")
+    except OSError as exc:
+        log("capture unavailable: %s" % exc)
+        sys.stderr.write("urftopwg: capture unavailable: %s\n" % exc)
+
+    try:
+        src = open(infile, "rb") if infile else sys.stdin.buffer
+    except OSError as exc:
+        log("input open failed: %s" % exc)
+        sys.stderr.write("urftopwg: cannot open input: %s\n" % exc)
+        if cap is not None:
+            cap.close()
+        return 1
+
+    try:
+        proc = subprocess.Popen([REAL] + args[:5] + ["-"],
+                                stdin=subprocess.PIPE, stdout=sys.stdout.buffer)
+    except OSError as exc:
+        log("spawn urftopwg.real failed: %s" % exc)
+        if cap is not None:
+            cap.close()
+        return 1
+
+    total = kept = 0
+    try:
+        while True:
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if cap is not None and kept < CAP:
+                part = chunk[:CAP - kept]
+                try:
+                    cap.write(part)
+                    kept += len(part)
+                except OSError as exc:
+                    log("capture write failed: %s" % exc)
+                    try:
+                        cap.close()
+                    except OSError:
+                        pass
+                    cap = None
+            proc.stdin.write(chunk)
+    except BrokenPipeError:
+        pass
+    except OSError as exc:
+        log("stream error: %s" % exc)
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        if cap is not None:
+            try:
+                cap.close()
+            except OSError:
+                pass
+
+    rc = proc.wait()
+    log("job %s total=%d kept=%d rc=%d file=%s%s" % (
+        job, total, kept, rc, path, " (truncated)" if total > kept else ""))
+
+    try:
+        files = [os.path.join(DIR, f) for f in os.listdir(DIR)
+                 if f.startswith("raw-") and f.endswith(".urf")]
+        files.sort(key=os.path.getmtime)
+        for old in files[:-KEEP]:
+            os.unlink(old)
+    except OSError:
+        pass
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,29 @@
+Third-party notices
+===================
+
+EPSON_L3250.ppd
+---------------
+File: package/root/usr/share/airprint/EPSON_L3250.ppd
+
+Derived from the PPD shipped with Seiko Epson's ESC/P-R Linux driver
+(epson-inkjet-printer-escpr), which is distributed under the GNU General
+Public License version 2.
+
+  Copyright (c) SEIKO EPSON Corporation 2009
+  Copyright 1987-1996 Adobe Systems Incorporated
+
+Local modification: the image/urf -> urftopwg cupsFilter2 entry used by this
+bridge. This file remains under GPL-2.0; the rest of this repository is MIT.
+
+urftopwg.c
+----------
+File: filter/urftopwg.c
+
+Original work for this project (MIT). It parses Apple URF (Universal Raster
+Format) and emits CUPS Raster v3 for CUPS' rastertopwg filter.
+
+Trademarks
+----------
+Apple and AirPrint are trademarks of Apple Inc. Epson and EPSON are
+trademarks of Seiko Epson Corporation. This project is not affiliated with,
+endorsed by, or sponsored by either company.

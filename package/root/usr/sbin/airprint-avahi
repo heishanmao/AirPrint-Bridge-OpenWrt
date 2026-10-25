@@ -1,0 +1,110 @@
+#!/usr/bin/python3
+"""Generate the Avahi service record for the AirPrint bridge from UCI."""
+import os
+import re
+import subprocess
+import sys
+from xml.sax.saxutils import escape
+
+sys.path.insert(0, "/usr/lib/airprint")
+import common
+
+SERVICE = "/etc/avahi/services/airprint.service"
+AVAHI_INIT = "/etc/init.d/avahi-daemon"
+
+
+def lan_ip(cfg):
+    value = (cfg.get("lan_ip") or "").strip()
+    if value:
+        return value.split("/")[0]
+    try:
+        out = subprocess.run(["uci", "-q", "get", "network.lan.ipaddr"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3)
+        value = out.stdout.decode("ascii", "replace").strip().split("/")[0]
+        if value:
+            return value
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "192.168.31.1"
+
+
+def render(cfg):
+    dpi = 600 if str(cfg.get("dpi", "300")).strip() == "600" else 300
+    queue = cfg.get("queue_name") or "EPSON_L3250"
+    name = cfg.get("service_name") or "EPSON L3250 Series"
+    note = (cfg.get("note") or "").strip()
+    if not note or re.match(r"^AirPrint \d+dpi via CUPS capability proxy$", note):
+        note = "AirPrint %ddpi via CUPS capability proxy" % dpi
+    pdl = cfg.get("pdl") or "image/urf,application/pdf,image/jpeg,image/png"
+    uuid = cfg.get("service_uuid") or "0ea66e10-844a-3a74-4c05-5b17c7daffa8"
+    port = int(cfg.get("listen_port") or 6310)
+    urf = "V1.4,RS%d,DM1,SRGB24,W8" % dpi
+    admin = "http://%s:631/" % lan_ip(cfg)
+    records = [
+        "txtvers=1", "qtotal=1", "rp=/printers/" + queue,
+        "ty=" + name, "product=(" + name + ")", "note=" + note,
+        "adminurl=" + admin, "priority=10", "kind=document,envelope,photo",
+        "PaperMax=legal-A4", "pdl=" + pdl, "air=print", "URF=" + urf,
+        "Color=T", "Duplex=F", "Scan=F", "Fax=F", "UUID=" + uuid,
+    ]
+    lines = [
+        "<?xml version=\"1.0\" standalone='no'?>",
+        "<!DOCTYPE service-group SYSTEM \"avahi-service.dtd\">",
+        "<service-group>",
+        "  <name replace-wildcards=\"yes\">%s</name>" % escape(name),
+        "  <service>",
+        "    <type>_ipp._tcp</type>",
+        "    <subtype>_universal._sub._ipp._tcp</subtype>",
+        "    <port>%d</port>" % port,
+    ]
+    for record in records:
+        lines.append("    <txt-record>%s</txt-record>" % escape(record))
+    lines += ["  </service>", "</service-group>", ""]
+    return "\n".join(lines)
+
+
+def reload_avahi():
+    if not os.path.exists(AVAHI_INIT):
+        print("avahi-daemon init not found", file=sys.stderr)
+        return
+    result = subprocess.run([AVAHI_INIT, "restart"], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    if result.returncode != 0:
+        print("avahi-daemon restart failed", file=sys.stderr)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "sync"
+    if action == "remove":
+        try:
+            os.unlink(SERVICE)
+        except FileNotFoundError:
+            return 0
+        reload_avahi()
+        return 0
+    if action == "show":
+        cfg = common.load_config()
+        sys.stdout.write(render(cfg))
+        return 0
+    cfg = common.load_config()
+    content = render(cfg)
+    old = None
+    try:
+        with open(SERVICE, "r", encoding="utf-8") as f:
+            old = f.read()
+    except OSError:
+        pass
+    if old == content:
+        if os.path.exists(AVAHI_INIT) and not os.path.exists("/var/run/avahi-daemon/pid"):
+            subprocess.run([AVAHI_INIT, "start"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        return 0
+    common.ensure_dir(os.path.dirname(SERVICE), 0o755)
+    with open(SERVICE, "w", encoding="utf-8") as f:
+        f.write(content)
+    reload_avahi()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

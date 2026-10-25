@@ -1,0 +1,15 @@
+# build outputs
+*.apk
+package/build/
+
+# platform binaries (built from source, see README)
+package/root/usr/sbin/airprint-proxy
+package/root/usr/lib/cups/filter/urftopwg.real
+filter/urftopwg.real
+
+# python
+__pycache__/
+*.pyc
+
+# logs and captures
+*.log

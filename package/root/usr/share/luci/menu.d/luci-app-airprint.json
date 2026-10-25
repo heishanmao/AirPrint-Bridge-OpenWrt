@@ -1,0 +1,14 @@
+{
+	"admin/services/airprint": {
+		"title": "AirPrint 打印桥",
+		"order": 59,
+		"action": {
+			"type": "view",
+			"path": "airprint/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-airprint" ],
+			"uci": { "airprint": true }
+		}
+	}
+}

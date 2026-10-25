@@ -1,0 +1,279 @@
+#!/usr/bin/python3
+"""CUPS backend: one PWG Print-Job per raster page to an IPPS printer."""
+import json
+import os
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, "/usr/lib/airprint")
+import common
+
+RUNDIR = "/tmp/airprint"
+LOG = RUNDIR + "/backend.log"
+SIDECAR = RUNDIR + "/backend.json"
+OVERLAY_TMP = "/overlay/ipps_tmp"
+RASTERTOPG = "/usr/lib/cups/filter/rastertopwg"
+DEFAULT_URI = "ipps://192.168.31.6:631/ipp/print"
+
+
+def log(msg):
+    common.log_line(LOG, msg)
+
+
+def sidecar(job, pages, status, error="", total=0, host="", port=0):
+    data = {
+        "job": job, "pages": pages, "status": status, "error": error[:200],
+        "bytes": total, "printer": "%s:%d" % (host, port), "time": common.iso(),
+    }
+    common.ensure_dir(RUNDIR)
+    tmp = SIDECAR + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False))
+        os.replace(tmp, SIDECAR)
+    except OSError:
+        pass
+
+
+def page_report(page, copies=1):
+    try:
+        sys.stderr.write("PAGE: %d %d\n" % (page, max(copies, 1)))
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def parse_response(payload):
+    status = common.ipp_status(payload)
+    attrs = common.parse_attrs(payload)
+    return status, {k: common.attr_text(attrs, k) for k in attrs}
+
+
+class IPPConn:
+    def __init__(self, host, port, path, secure):
+        raw = socket.create_connection((host, port), timeout=20)
+        if secure:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            self.sock = ctx.wrap_socket(raw, server_hostname=host)
+        else:
+            self.sock = raw
+        self.sock.settimeout(300)
+        self.host, self.port, self.path = host, port, path
+        self.reqid = int(time.time()) & 0xFFFF
+
+    def request(self, op, body, data=None, data_len=0):
+        self.reqid = (self.reqid + 1) & 0xFFFF
+        ipp = struct.pack(">HHI", 0x0200, op, self.reqid) + body
+        head = ("POST %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Type: application/ipp\r\n"
+                "Content-Length: %d\r\nConnection: close\r\n\r\n"
+                % (self.path, self.host, self.port, len(ipp) + data_len)).encode("ascii")
+        self.sock.sendall(head + ipp)
+        if data_len:
+            left = data_len
+            while left > 0:
+                chunk = data.read(min(65536, left))
+                if not chunk:
+                    raise IOError("short PWG file, %d bytes missing" % left)
+                self.sock.sendall(chunk)
+                left -= len(chunk)
+        resp = b""
+        try:
+            while True:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    break
+                resp += chunk
+        except OSError as exc:
+            log("recv error: %r" % exc)
+        idx = resp.find(b"\r\n\r\n")
+        if idx < 0:
+            log("no HTTP header in response (%d bytes)" % len(resp))
+            return None, {}
+        return parse_response(resp[idx + 4:])
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def mem_available():
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    return 1 << 30
+
+
+def page_tmp():
+    if mem_available() < 32 * 1024 * 1024:
+        try:
+            common.ensure_dir(OVERLAY_TMP)
+            return tempfile.TemporaryFile(dir=OVERLAY_TMP)
+        except OSError as exc:
+            log("overlay temp unavailable: %r" % exc)
+    return tempfile.TemporaryFile()
+
+
+def convert_page(src, header, height, bpl, job, user, title):
+    out = page_tmp()
+    try:
+        proc = subprocess.Popen([RASTERTOPG, job, user, title, "1", ""],
+                                stdin=subprocess.PIPE, stdout=out, stderr=subprocess.PIPE)
+        proc.stdin.write(b"3SaR" + header)
+        left = height * bpl
+        while left > 0:
+            chunk = src.read(min(1 << 20, left))
+            if not chunk:
+                proc.kill()
+                proc.wait()
+                raise IOError("raster data truncated, %d bytes missing" % left)
+            proc.stdin.write(chunk)
+            left -= len(chunk)
+        proc.stdin.close()
+        err = proc.stderr.read()
+        rc = proc.wait()
+        if rc != 0:
+            raise IOError("rastertopwg rc=%d %s" % (rc, err[:200].decode("utf-8", "replace")))
+        size = out.tell()
+        out.seek(0)
+        return out, size
+    except Exception:
+        out.close()
+        raise
+
+
+def send_page(pwg, size, page, copies, target, body_base):
+    body = body_base
+    if copies > 1:
+        body += b"\x02" + common.attr_int("copies", copies)
+    body += b"\x03"
+    attrs = {}
+    for attempt in range(5):
+        try:
+            pwg.seek(0)
+            conn = IPPConn(target["host"], target["port"], target["path"], target["secure"])
+            status, attrs = conn.request(0x0002, body, pwg, size)
+            conn.close()
+        except Exception as exc:
+            log("page %d Print-Job attempt %d error: %r" % (page, attempt + 1, exc))
+            status = None
+        log("page %d Print-Job attempt %d status=%s" % (
+            page, attempt + 1, "0x%04x" % status if status is not None else "none"))
+        if status in (0x0000, 0x0001):
+            return True, attrs
+        if status is not None and status not in (0x0505, 0x0507):
+            break
+        time.sleep(3 * (attempt + 1))
+    return False, attrs
+
+
+def main():
+    job = sys.argv[1] if len(sys.argv) > 1 else "0"
+    user = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+    title = sys.argv[3] if len(sys.argv) > 3 else "job"
+    copies = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 1
+    uri = os.environ.get("DEVICE_URI") or DEFAULT_URI
+    target = common.parse_uri(uri)
+    if not target["secure"]:
+        log("job %s: DEVICE_URI must use ipps://" % job)
+        sidecar(job, 0, "failed", "DEVICE_URI must use ipps://", host=target["host"], port=target["port"])
+        return 1
+    log("job %s start user=%s copies=%d target=%s title=%r" % (
+        job, user, copies, target["uri"], title[:60]))
+    sidecar(job, 0, "printing", host=target["host"], port=target["port"])
+
+    deadline = time.time() + 45
+    while True:
+        ready, _ = common.tls_check(target["host"], target["port"], 3.0)
+        if ready:
+            break
+        if time.time() >= deadline:
+            log("job %s: printer TLS/IPP not ready after 45s" % job)
+            sidecar(job, 0, "failed", "printer TLS/IPP not ready",
+                    host=target["host"], port=target["port"])
+            return 1
+        log("job %s: waiting for printer TLS/IPP readiness" % job)
+        time.sleep(3)
+
+    try:
+        src = open(sys.argv[6], "rb") if len(sys.argv) > 6 and os.path.exists(sys.argv[6]) else sys.stdin.buffer
+    except OSError as exc:
+        log("job %s: cannot open input: %r" % (job, exc))
+        sidecar(job, 0, "failed", "cannot open input", host=target["host"], port=target["port"])
+        return 1
+
+    sync = src.read(4)
+    if sync != b"3SaR":
+        log("job %s: not CUPS raster (sync=%r)" % (job, sync))
+        sidecar(job, 0, "failed", "not CUPS raster", host=target["host"], port=target["port"])
+        return 1
+
+    body_base = (b"\x01" +
+                 common.attr_str("attributes-charset", "utf-8", 0x47) +
+                 common.attr_str("attributes-natural-language", "en", 0x48) +
+                 common.attr_str("printer-uri", target["uri"], 0x45) +
+                 common.attr_str("requesting-user-name", user, 0x42) +
+                 common.attr_str("job-name", title[:127], 0x42) +
+                 common.attr_str("document-format", "image/pwg-raster", 0x49))
+
+    page = 0
+    total = 0
+    while True:
+        header = src.read(1796)
+        if not header:
+            break
+        if len(header) < 1796:
+            log("job %s: short page header (%d bytes)" % (job, len(header)))
+            sidecar(job, page, "failed", "short page header", total, target["host"], target["port"])
+            return 1
+        height = struct.unpack_from("<I", header, 376)[0]
+        bpl = struct.unpack_from("<I", header, 392)[0]
+        if height == 0 or bpl == 0 or height > 50000 or bpl > (1 << 20):
+            log("job %s: bad page header height=%d bpl=%d" % (job, height, bpl))
+            sidecar(job, page, "failed", "bad page header", total, target["host"], target["port"])
+            return 1
+        page += 1
+        try:
+            pwg, size = convert_page(src, header, height, bpl, job, user, title)
+        except Exception as exc:
+            log("job %s page %d convert failed: %r" % (job, page, exc))
+            sidecar(job, page - 1, "failed", "convert failed: %s" % exc, total,
+                    target["host"], target["port"])
+            return 1
+        log("page %d: %dx%d raster -> pwg %d bytes" % (page, bpl // 3, height, size))
+        try:
+            ok, attrs = send_page(pwg, size, page, copies, target, body_base)
+        finally:
+            pwg.close()
+        if not ok:
+            log("job %s page %d FAILED" % (job, page))
+            sidecar(job, page - 1, "failed", "printer rejected page %d" % page, total,
+                    target["host"], target["port"])
+            return 1
+        total += size
+        sidecar(job, page, "printing", total=total, host=target["host"], port=target["port"])
+        page_report(page, copies)
+
+    if page == 0:
+        log("job %s: no pages in job" % job)
+        sidecar(job, 0, "failed", "no pages in job", host=target["host"], port=target["port"])
+        return 1
+    log("job %s SUCCESS pages=%d pwg=%d bytes" % (job, page, total))
+    sidecar(job, page, "success", total=total, host=target["host"], port=target["port"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

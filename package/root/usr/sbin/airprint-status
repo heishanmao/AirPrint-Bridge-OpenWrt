@@ -1,0 +1,84 @@
+#!/usr/bin/python3
+"""Query the local AirPrint bridge status."""
+import json
+import sys
+import time
+import urllib.request
+
+URL = "http://127.0.0.1:6310/status.json"
+MARK = {"ok": "[OK]", "warn": "[!]", "bad": "[X]", "idle": "[-]"}
+
+
+def fetch():
+    with urllib.request.urlopen(URL, timeout=5) as resp:
+        return json.load(resp)
+
+
+def human(sec):
+    sec = max(0, int(sec))
+    if sec < 60:
+        return "%ds" % sec
+    if sec < 3600:
+        return "%dm%02ds" % (sec // 60, sec % 60)
+    return "%dh%02dm" % (sec // 3600, (sec % 3600) // 60)
+
+
+def show(data):
+    print("AirPrint Bridge %s  %s  %s" % (data["version"], data["level"].upper(), data["time"]))
+    for stage in data["stages"]:
+        print("  %-6s %-14s %s" % (MARK.get(stage["level"], "[?]"), stage["name"], stage["detail"]))
+    active = data.get("active") or []
+    if active:
+        print("\nActive jobs:")
+        for job in active:
+            print("  #%s %s [%s] %s pages, %s" % (
+                job["id"], job.get("name") or "-", job.get("state_text") or "-",
+                job.get("pages"), human(job.get("elapsed_s"))))
+    last = data.get("last")
+    if last:
+        print("\nLast job: #%s %s [%s] %s pages, %s -> %s" % (
+            last["id"], last.get("name") or "-", last.get("state_text") or "-",
+            last.get("pages"), human(last.get("duration_s")), last.get("diagnosis") or "-"))
+    history = data.get("history") or []
+    if len(history) > 1:
+        print("\nRecent:")
+        for rec in history[1:6]:
+            print("  %s #%s %-24s %2s pages %-6s %s" % (
+                rec["end"][5:16].replace("T", " "), rec["id"], (rec.get("name") or "-")[:24],
+                rec.get("pages") or 0, rec.get("state_text") or "-", rec.get("diagnosis") or ""))
+    if "--logs" in sys.argv:
+        print("")
+        for name, text in (data.get("logs") or {}).items():
+            print("--- %s ---" % name)
+            print(text or "(empty)")
+
+
+def main():
+    watch = 0
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--watch" and i + 1 < len(args):
+            try:
+                watch = max(1, int(args[i + 1]))
+            except ValueError:
+                watch = 5
+    while True:
+        try:
+            data = fetch()
+        except Exception as exc:
+            print("airprint-proxy unreachable: %r" % exc)
+            if not watch:
+                return 1
+        else:
+            if "--json" in args:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            else:
+                show(data)
+        if not watch:
+            return 0
+        time.sleep(watch)
+        print("")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
