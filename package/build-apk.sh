@@ -50,14 +50,18 @@ chmod 0755 "$STAGE/usr/sbin/airprint-proxy" \
 	"$STAGE/usr/lib/cups/filter/urftopwg.real" \
 	"$STAGE/usr/lib/cups/filter/urftopwg" \
 	"$STAGE/usr/lib/cups/backend/ipps" \
-	"$STAGE/etc/init.d/airprint"
+	"$STAGE/etc/init.d/airprint" \
+	"$STAGE/etc/uci-defaults/90-airprint" \
+	"$STAGE/etc/uci-defaults/91-ontaccess"
 chmod 0755 "$STAGE"/usr/sbin/airprint-avahi "$STAGE"/usr/sbin/airprint-setup \
-	"$STAGE"/usr/sbin/airprint-status "$STAGE"/usr/lib/airprint/airprint-proxy.py
+	"$STAGE"/usr/sbin/airprint-status "$STAGE"/usr/sbin/ontaccess-setup \
+	"$STAGE"/usr/lib/airprint/airprint-proxy.py
 chmod 0644 "$STAGE/usr/share/airprint/EPSON_L3250.ppd" \
 	"$STAGE/usr/share/airprint/README.md" \
 	"$STAGE/usr/lib/airprint/common.py" \
 	"$STAGE"/usr/share/luci/menu.d/*.json "$STAGE"/usr/share/rpcd/acl.d/*.json \
-	"$STAGE"/www/luci-static/resources/view/airprint/*.js
+	"$STAGE"/www/luci-static/resources/view/airprint/*.js \
+	"$STAGE"/www/luci-static/resources/view/ontaccess/*.js
 
 mkdir -p "$BUILD"
 cd "$BUILD"

@@ -1,0 +1,377 @@
+#!/usr/bin/python3
+"""Publish the upstream ONT management UI to the LAN.
+
+Adds a static address on the WAN port, a masquerading firewall zone and an
+optional DHCP classless route (option 121), so LAN clients can open the
+optical modem's web UI without touching the PPPoE session.
+"""
+import ipaddress
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+TAG = "ontaccess"
+IFACE = "ont"
+ZONE = "ont"
+FWD = "ontfwd"
+WAN_DEV = "wan"
+LAN_IF = "lan"
+
+DEFAULTS = {
+    "enabled": "0",
+    "ont_ip": "192.168.1.1",
+    "prefix": "24",
+    "local_ip": "192.168.1.2",
+    "dhcp_route": "1",
+}
+
+
+def run(cmd, timeout=15):
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(cmd, 127, b"", str(exc).encode())
+
+
+def uci_get(key, default=None):
+    res = run(["uci", "-q", "get", key], 8)
+    if res.returncode != 0:
+        return default
+    return res.stdout.decode("utf-8", "replace").strip()
+
+
+def uci_set(key, value):
+    res = run(["uci", "set", "%s=%s" % (key, value)], 8)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or
+                           "uci set %s failed" % key)
+
+
+def uci_delete(key):
+    run(["uci", "-q", "delete", key], 8)
+
+
+def uci_commit(name):
+    res = run(["uci", "commit", name], 10)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or
+                           "uci commit %s failed" % name)
+
+
+def uci_add_list(key, value):
+    res = run(["uci", "add_list", "%s=%s" % (key, value)], 8)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or
+                           "uci add_list %s failed" % key)
+
+
+def uci_del_list(key, value):
+    run(["uci", "-q", "del_list", "%s=%s" % (key, value)], 8)
+
+
+def truthy(value, default=False):
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_cfg():
+    section = uci_get("ontaccess.main")
+    if section is None:
+        return {
+            "exists": False,
+            "enabled": False,
+            "ont_ip": DEFAULTS["ont_ip"],
+            "prefix": DEFAULTS["prefix"],
+            "local_ip": DEFAULTS["local_ip"],
+            "dhcp_route": True,
+        }
+    return {
+        "exists": True,
+        "enabled": truthy(uci_get("ontaccess.main.enabled", "0")),
+        "ont_ip": uci_get("ontaccess.main.ont_ip", DEFAULTS["ont_ip"]),
+        "prefix": uci_get("ontaccess.main.prefix", DEFAULTS["prefix"]),
+        "local_ip": uci_get("ontaccess.main.local_ip", DEFAULTS["local_ip"]),
+        "dhcp_route": truthy(uci_get("ontaccess.main.dhcp_route", "1"), True),
+    }
+
+
+def lan_network():
+    raw = uci_get("network.lan.ipaddr", "192.168.31.1") or "192.168.31.1"
+    if "/" in raw:
+        return ipaddress.ip_network(raw, strict=False)
+    mask = uci_get("network.lan.netmask", "255.255.255.0") or "255.255.255.0"
+    try:
+        prefix = ipaddress.IPv4Network("0.0.0.0/" + mask).prefixlen
+    except ValueError:
+        prefix = 24
+    return ipaddress.ip_network("%s/%d" % (raw, prefix), strict=False)
+
+
+def lan_address():
+    raw = uci_get("network.lan.ipaddr", "192.168.31.1") or "192.168.31.1"
+    return raw.split("/")[0]
+
+
+def resolve(cfg):
+    try:
+        ont_ip = ipaddress.IPv4Address(cfg["ont_ip"])
+        prefix = int(str(cfg["prefix"]))
+    except ValueError:
+        raise ValueError("光猫 IP 或前缀格式不正确")
+    if prefix < 8 or prefix > 30:
+        raise ValueError("前缀长度需在 8-30 之间")
+    net = ipaddress.ip_network("%s/%d" % (ont_ip, prefix), strict=False)
+    if ont_ip in (net.network_address, net.broadcast_address):
+        raise ValueError("光猫 IP 不能是网段或广播地址")
+    raw_local = cfg.get("local_ip") or str(net.network_address + 2)
+    try:
+        local = ipaddress.IPv4Address(raw_local)
+    except ValueError:
+        raise ValueError("本机地址格式不正确")
+    if local not in net:
+        raise ValueError("本机地址必须与光猫在同一网段")
+    if local in (net.network_address, net.broadcast_address):
+        raise ValueError("本机地址不能是网段或广播地址")
+    if local == ont_ip:
+        raise ValueError("本机地址不能与光猫 IP 相同")
+    lan = lan_network()
+    if net.overlaps(lan):
+        raise ValueError("光猫网段与 LAN 网段（%s）重叠" % lan)
+    return net, local
+
+
+def route_option(net):
+    return "121,%s,%s" % (net.with_prefixlen, lan_address())
+
+
+def forwarding_sections():
+    res = run(["uci", "show", "firewall"], 10)
+    names = []
+    for line in res.stdout.decode("utf-8", "replace").splitlines():
+        if "=forwarding" in line:
+            names.append(line.split("=", 1)[0])
+    return names
+
+
+def cleanup_forwarding():
+    for section in forwarding_sections():
+        if section == "firewall." + FWD:
+            continue
+        if uci_get(section + ".src") == LAN_IF and uci_get(section + ".dest") == ZONE:
+            uci_delete(section)
+
+
+def ensure_config():
+    path = "/etc/config/ontaccess"
+    if not os.path.exists(path):
+        try:
+            with open(path, "w", encoding="utf-8"):
+                pass
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            raise RuntimeError("无法创建 %s：%s" % (path, exc))
+
+
+def write_cfg(cfg):
+    ensure_config()
+    uci_set("ontaccess.main", TAG)
+    uci_set("ontaccess.main.enabled", "1" if cfg["enabled"] else "0")
+    uci_set("ontaccess.main.ont_ip", cfg["ont_ip"])
+    uci_set("ontaccess.main.prefix", str(cfg["prefix"]))
+    uci_set("ontaccess.main.local_ip", cfg["local_ip"])
+    uci_set("ontaccess.main.dhcp_route", "1" if cfg["dhcp_route"] else "0")
+    uci_commit("ontaccess")
+
+
+def apply_cfg(cfg):
+    net, local = resolve(cfg)
+    uci_set("network." + IFACE, "interface")
+    uci_set("network.%s.proto" % IFACE, "static")
+    uci_set("network.%s.device" % IFACE, WAN_DEV)
+    uci_set("network.%s.ipaddr" % IFACE, str(local))
+    uci_set("network.%s.netmask" % IFACE, str(net.netmask))
+    uci_set("network.%s.defaultroute" % IFACE, "0")
+    uci_set("network.%s.peerdns" % IFACE, "0")
+    uci_set("network.%s.metric" % IFACE, "100")
+    uci_commit("network")
+    run(["ifup", IFACE], 20)
+
+    cleanup_forwarding()
+    uci_set("firewall." + ZONE, "zone")
+    uci_set("firewall.%s.name" % ZONE, ZONE)
+    uci_set("firewall.%s.input" % ZONE, "REJECT")
+    uci_set("firewall.%s.output" % ZONE, "ACCEPT")
+    uci_set("firewall.%s.forward" % ZONE, "REJECT")
+    uci_set("firewall.%s.masq" % ZONE, "1")
+    uci_set("firewall.%s.network" % ZONE, IFACE)
+    uci_set("firewall." + FWD, "forwarding")
+    uci_set("firewall.%s.src" % FWD, LAN_IF)
+    uci_set("firewall.%s.dest" % FWD, ZONE)
+    uci_commit("firewall")
+    run(["/etc/init.d/firewall", "reload"], 30)
+
+    if uci_get("dhcp.lan") is not None:
+        option = route_option(net)
+        uci_del_list("dhcp.lan.dhcp_option", option)
+        if cfg["dhcp_route"]:
+            uci_add_list("dhcp.lan.dhcp_option", option)
+        uci_commit("dhcp")
+        run(["/etc/init.d/dnsmasq", "restart"], 20)
+    return net, local
+
+
+def disable_cfg(cfg):
+    run(["ifdown", IFACE], 20)
+    uci_delete("network." + IFACE)
+    uci_delete("firewall." + ZONE)
+    uci_delete("firewall." + FWD)
+    cleanup_forwarding()
+    try:
+        net, _ = resolve(cfg)
+        if uci_get("dhcp.lan") is not None:
+            uci_del_list("dhcp.lan.dhcp_option", route_option(net))
+    except ValueError:
+        pass
+    uci_commit("network")
+    uci_commit("firewall")
+    uci_commit("dhcp")
+    run(["/etc/init.d/firewall", "reload"], 30)
+    run(["/etc/init.d/dnsmasq", "restart"], 20)
+
+
+def http_probe(host):
+    started = time.time()
+    sock = None
+    try:
+        sock = socket.create_connection((host, 80), 2.0)
+        sock.settimeout(2.0)
+        req = ("GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: ontaccess\r\n\r\n" % host).encode()
+        sock.sendall(req)
+        data = sock.recv(64)
+        return True, data.startswith(b"HTTP/"), int((time.time() - started) * 1000)
+    except OSError:
+        return False, False, None
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def status():
+    cfg = load_cfg()
+    out = {
+        "enabled": cfg["enabled"],
+        "exists": cfg["exists"],
+        "ont_ip": cfg["ont_ip"],
+        "prefix": cfg["prefix"],
+        "local_ip": cfg["local_ip"],
+        "dhcp_route": cfg["dhcp_route"],
+        "lan_ip": lan_address(),
+        "configured": uci_get("network." + IFACE) is not None,
+        "forwarding": (uci_get("firewall.%s.src" % FWD) == LAN_IF and
+                       uci_get("firewall.%s.dest" % FWD) == ZONE),
+        "masq": uci_get("firewall.%s.masq" % ZONE) == "1",
+    }
+    try:
+        net, local = resolve(cfg)
+        out["local_ip"] = str(local)
+        out["network"] = net.with_prefixlen
+        option = route_option(net)
+        out["option"] = option
+        out["route_pushed"] = option in (uci_get("dhcp.lan.dhcp_option", "") or "").splitlines()
+    except ValueError as exc:
+        out["error"] = str(exc)
+        net = None
+        local = None
+
+    if local is not None:
+        ipout = run(["ip", "-4", "addr", "show", "dev", WAN_DEV], 5).stdout.decode("utf-8", "replace")
+        out["local_present"] = ("inet %s/" % local) in ipout
+        out["interface_up"] = out["local_present"]
+        reachable, http, ms = http_probe(cfg["ont_ip"])
+        out["reachable"] = reachable
+        out["http"] = http
+        out["ms"] = ms
+    else:
+        out["local_present"] = False
+        out["interface_up"] = False
+        out["reachable"] = False
+        out["http"] = False
+        out["ms"] = None
+        out["route_pushed"] = False
+    return out
+
+
+def init_cfg():
+    if uci_get("ontaccess.main") is not None:
+        return
+    ensure_config()
+    uci_set("ontaccess.main", TAG)
+    for key, value in DEFAULTS.items():
+        uci_set("ontaccess.main." + key, value)
+    uci_commit("ontaccess")
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else "status"
+    try:
+        if command == "init":
+            init_cfg()
+            print(json.dumps({"ok": True}, ensure_ascii=False))
+            return 0
+        if command == "status":
+            print(json.dumps(status(), ensure_ascii=False))
+            return 0
+        if command == "apply":
+            cfg = load_cfg()
+            if cfg["enabled"]:
+                apply_cfg(cfg)
+            else:
+                disable_cfg(cfg)
+            out = status()
+            out["ok"] = True
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        if command == "disable":
+            cfg = load_cfg()
+            disable_cfg(cfg)
+            out = status()
+            out["ok"] = True
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        if command == "set":
+            if len(argv) < 7:
+                raise ValueError("用法：set <enabled> <ont_ip> <prefix> <local_ip> <dhcp_route>")
+            cfg = {
+                "enabled": argv[2] == "1",
+                "ont_ip": argv[3].strip(),
+                "prefix": argv[4].strip(),
+                "local_ip": argv[5].strip(),
+                "dhcp_route": argv[6] == "1",
+            }
+            if cfg["enabled"]:
+                resolve(cfg)
+            write_cfg(cfg)
+            if cfg["enabled"]:
+                apply_cfg(cfg)
+            else:
+                disable_cfg(cfg)
+            out = status()
+            out["ok"] = True
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        raise ValueError("未知命令：%s" % command)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -42,6 +42,7 @@ EPSON L3250（192.168.31.6:631/ipp/print）
 - **任务历史**：JSONL 持久化，条数可配。
 - **推送**：Bark / ntfy / 通用 JSON Webhook。
 - **LuCI 页面**：`服务 → AirPrint 打印桥`，状态、当前任务、历史、配置和日志。
+- **光猫管理入口（可选）**：`网络 → 光猫管理入口`，把上游光猫的网页安全地开放给局域网（不改变 PPPoE 拨号）。
 - **URF 抓包**：可选保留最近的 iPhone 原始 URF（用于调试，默认限量，失败不影响打印）。
 
 ## 环境要求
@@ -81,7 +82,7 @@ LogLevel warn
 3. 从 [Releases](https://github.com/heishanmao/AirPrint-Bridge-OpenWrt/releases) 下载 APK，上传到路由器后安装：
 
 ```sh
-apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r10.apk
+apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r11.apk
 ```
 
 4. 修改 `/etc/config/airprint`（至少改这几项）：
@@ -107,6 +108,21 @@ airprint-setup check
 6. iPhone「添加打印机」里选择 `service_name`，打印时确认纸张和份数即可。
 
 升级 APK 时配置、历史、CUPS 队列和 PPD 都会保留；队列里有未完成任务时安装会被拒绝。
+
+## 光猫管理入口（可选）
+
+如果路由器上游是**桥接**光猫（PPPoE 由路由器拨号），光猫的管理页通常仍在 `192.168.1.1`，只是局域网无法路由到它。这个模块在 WAN 口加一个同网段地址，并用 SNAT 让局域网访问：
+
+- LuCI：`网络 → 光猫管理入口`，可启用/停用、修改光猫地址、子网前缀、本机地址，以及是否通过 DHCP option 121 推送路由。
+- 命令行：`ontaccess-setup status | apply | disable`，配置在 `/etc/config/ontaccess`。
+- 默认**关闭**；启用时创建 `network.ont`（`wan` 上的静态地址）、`firewall.ont`（`masq`）、`lan → ont` 转发和 DHCP option 121。停用会把这些配置移除。
+
+注意：
+
+- 需要光猫在链路上响应该管理地址；桥接后管理 VLAN 不通的机型不适用。
+- 所有局域网设备共用同一个源地址，光猫通常只保留一个管理会话，多台设备同时登录可能互相踢下线。
+- 客户端需要重新获取 DHCP 租约才能拿到路由；VPN/代理接管默认路由的设备可能需要手动加一条到光猫网段的路由。
+- 只允许局域网访问，不会把光猫暴露到 WAN。
 
 ## 配置项
 
@@ -193,7 +209,7 @@ LuCI：`http://<路由器>/cgi-bin/luci/admin/services/airprint`。
 ```
 go/                 Go 代理源码（stdlib，无第三方依赖）
 filter/urftopwg.c   URF → CUPS Raster 过滤器（v13）
-package/root/       APK 安装内容（init、代理辅助脚本、CUPS 后端/过滤器、PPD、LuCI 页面）
+package/root/       APK 安装内容（init、代理辅助脚本、CUPS 后端/过滤器、PPD、LuCI 页面、光猫入口）
 package/scripts/    APK 安装/升级脚本
 package/build-apk.sh
 ```
@@ -206,6 +222,7 @@ package/build-apk.sh
 - 600 dpi 的 URF 单页数据约为 300 dpi 的 4 倍，内存紧张的路由器不建议开启。
 - 代理与 CUPS 同机部署；CUPS 默认只监听 loopback。
 - iOS 27 不提供 Print Center 入口，任务状态以 LuCI 页面为准。
+- 光猫管理入口要求光猫在物理链路上响应管理地址；桥接后管理 VLAN 不通的机型无法使用。
 
 ## 许可证
 

@@ -1,0 +1,13 @@
+{
+	"admin/network/ontaccess": {
+		"title": "光猫管理入口",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "ontaccess/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-ontaccess" ]
+		}
+	}
+}

@@ -1,0 +1,15 @@
+{
+	"luci-app-ontaccess": {
+		"description": "ONT management access helper",
+		"read": {
+			"file": {
+				"/usr/sbin/ontaccess-setup": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/ontaccess-setup": [ "exec" ]
+			}
+		}
+	}
+}

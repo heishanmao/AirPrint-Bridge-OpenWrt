@@ -170,11 +170,16 @@ def replace_apk_new(path):
 def chown_root():
     paths = ("/usr/sbin/airprint-avahi", "/usr/sbin/airprint-proxy",
              "/usr/sbin/airprint-setup", "/usr/sbin/airprint-status",
+             "/usr/sbin/ontaccess-setup",
              "/usr/lib/airprint", "/usr/lib/cups/backend/ipps",
              "/usr/lib/cups/filter/urftopwg", "/usr/lib/cups/filter/urftopwg.real",
              "/usr/share/airprint", "/usr/share/luci/menu.d/luci-app-airprint.json",
+             "/usr/share/luci/menu.d/luci-app-ontaccess.json",
              "/usr/share/rpcd/acl.d/luci-app-airprint.json",
+             "/usr/share/rpcd/acl.d/luci-app-ontaccess.json",
              "/www/luci-static/resources/view/airprint",
+             "/www/luci-static/resources/view/ontaccess",
+             "/etc/uci-defaults/91-ontaccess",
              INIT, "/etc/uci-defaults/90-airprint")
     for path in paths:
         if not os.path.exists(path):
@@ -200,11 +205,15 @@ def postinstall():
     defaults = "/etc/uci-defaults/90-airprint"
     if os.path.exists(defaults):
         subprocess.call(["/bin/sh", defaults])
+    ont_defaults = "/etc/uci-defaults/91-ontaccess"
+    if os.path.exists(ont_defaults):
+        subprocess.call(["/bin/sh", ont_defaults])
     if os.path.exists(INIT):
         run([INIT, "stop"])
         run([INIT, "disable"])
     replace_apk_new(INIT)
     replace_apk_new("/etc/uci-defaults/90-airprint")
+    replace_apk_new("/etc/uci-defaults/91-ontaccess")
     chown_root()
     old = "/etc/avahi/services/EPSON_L3250.service"
     if os.path.exists(old):
@@ -227,6 +236,9 @@ def postinstall():
             pass
     if os.path.exists("/etc/init.d/rpcd"):
         run(["/etc/init.d/rpcd", "reload"])
+    if os.path.exists("/usr/sbin/ontaccess-setup"):
+        run(["/usr/sbin/ontaccess-setup", "init"])
+        run(["/usr/sbin/ontaccess-setup", "apply"], timeout=60)
     run([INIT, "enable"])
     return apply()
 
@@ -234,6 +246,8 @@ def postinstall():
 def deinstall():
     run([INIT, "stop"])
     run([INIT, "disable"])
+    if os.path.exists("/usr/sbin/ontaccess-setup"):
+        run(["/usr/sbin/ontaccess-setup", "disable"], timeout=60)
     run([AVAHI, "remove"])
     print("config, job history and CUPS queue were kept")
     return 0
