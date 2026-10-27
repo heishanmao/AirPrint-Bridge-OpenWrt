@@ -42,7 +42,7 @@ EPSON L3250（192.168.31.6:631/ipp/print）
 - **任务历史**：JSONL 持久化，条数可配。
 - **推送**：Bark / ntfy / 通用 JSON Webhook。
 - **LuCI 页面**：`服务 → AirPrint 打印桥`，状态、当前任务、历史、配置和日志。
-- **光猫管理入口（可选）**：`网络 → 光猫管理入口`，把上游光猫的网页安全地开放给局域网（不改变 PPPoE 拨号）。
+- **光猫管理入口（可选）**：`服务 → 光猫管理入口`，把上游光猫的网页安全地开放给局域网（不改变 PPPoE 拨号）。
 - **URF 抓包**：可选保留最近的 iPhone 原始 URF（用于调试，默认限量，失败不影响打印）。
 
 ## 环境要求
@@ -82,7 +82,7 @@ LogLevel warn
 3. 从 [Releases](https://github.com/heishanmao/AirPrint-Bridge-OpenWrt/releases) 下载 APK，上传到路由器后安装：
 
 ```sh
-apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r11.apk
+apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r12.apk
 ```
 
 4. 修改 `/etc/config/airprint`（至少改这几项）：
@@ -113,7 +113,7 @@ airprint-setup check
 
 如果路由器上游是**桥接**光猫（PPPoE 由路由器拨号），光猫的管理页通常仍在 `192.168.1.1`，只是局域网无法路由到它。这个模块在 WAN 口加一个同网段地址，并用 SNAT 让局域网访问：
 
-- LuCI：`网络 → 光猫管理入口`，可启用/停用、修改光猫地址、子网前缀、本机地址，以及是否通过 DHCP option 121 推送路由。
+- LuCI：`服务 → 光猫管理入口`，可启用/停用、修改光猫地址、子网前缀、本机地址，以及是否通过 DHCP option 121 推送路由。
 - 命令行：`ontaccess-setup status | apply | disable`，配置在 `/etc/config/ontaccess`。
 - 默认**关闭**；启用时创建 `network.ont`（`wan` 上的静态地址）、`firewall.ont`（`masq`）、`lan → ont` 转发和 DHCP option 121。停用会把这些配置移除。
 
@@ -164,7 +164,7 @@ cd AirPrint-Bridge-OpenWrt
 sh filter/build.sh                      # 默认 aarch64-linux-musl
 
 # 2) 打包 APK（会顺带交叉编译 Go 代理）
-APK_STATIC=/path/to/apk.static VERSION=1.1.0-r10 sh package/build-apk.sh
+APK_STATIC=/path/to/apk.static VERSION=1.1.0-r12 sh package/build-apk.sh
 ```
 
 产物：`package/build/airprint-bridge-<VERSION>.apk`。

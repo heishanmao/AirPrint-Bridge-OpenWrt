@@ -1,6 +1,7 @@
 'use strict';
 'require view';
 'require uci';
+'require form';
 'require fs';
 'require poll';
 'require ui';
@@ -148,9 +149,12 @@ return view.extend({
 		this.logsBox = E('div');
 		this.stamp = E('div', { 'class': 'ap-stamp' }, '等待数据');
 
+		var configBox = E('div');
+		var configPromise = this.renderConfig();
+
 		var page = E('div', { 'class': 'ap-page' }, [
 			E('style', {}, [ [
-				'.ap-page{max-width:1150px}',
+				'.ap-page{width:100%}',
 				'.ap-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 16px}',
 				'.ap-head .ap-spacer{flex:1}',
 				'.ap-badge{display:inline-flex;align-items:center;padding:4px 11px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid rgba(127,127,127,.3)}',
@@ -231,7 +235,7 @@ return view.extend({
 				this.historyBox
 			]),
 
-			this.renderConfig(),
+			configBox,
 
 			E('div', { 'class': 'ap-card' }, [
 				E('h3', {}, '日志'),
@@ -250,80 +254,78 @@ return view.extend({
 			return self.refresh();
 		}, 3);
 
-		return page;
+		return Promise.resolve(configPromise).then(function(node) {
+			configBox.appendChild(node);
+			return page;
+		});
 	},
 
 	renderConfig: function() {
-		var dpi = cfg('dpi');
-		var kind = cfg('notify_kind');
-		var events = (cfg('notify_events') || '').split(',').map(function(item) {
-			return item.trim();
-		});
-		var applyBtn = E('button', { 'class': 'cbi-button cbi-button-apply', 'click': ui.createHandlerFn(this, 'handleApply') }, '保存并应用');
+		var m = new form.Map('airprint');
+		this.map = m;
+		var s = m.section(form.NamedSection, 'main', 'airprint', '设置',
+			'保存后会重新生成 Avahi 广播、同步 CUPS 并重启代理。配置升级时不会丢失。');
+		s.addremove = false;
 
-		return E('div', { 'class': 'ap-card' }, [
-			E('h3', {}, '设置'),
-			E('p', { 'class': 'ap-help' }, '保存后会重新生成 Avahi 广播、同步 CUPS 并重启代理。配置升级时不会丢失。'),
-			E('div', { 'class': 'ap-flags' }, [
-				checkbox('ap-enabled', '启用 AirPrint 打印桥', cfg('enabled') !== '0'),
-				checkbox('ap-auto-recover', '队列停止时自动恢复', cfg('auto_recover') === '1'),
-				checkbox('ap-offline-guard', '打印机离线时拦截任务', cfg('offline_guard') === '1'),
-				checkbox('ap-debug', '调试日志', cfg('debug') === '1')
-			]),
-			E('div', { 'class': 'ap-grid', 'style': 'margin-top:12px' }, [
-				field('打印分辨率', 'ap-dpi', E('select', { 'id': 'ap-dpi', 'class': 'cbi-input-select' }, [
-					E('option', { 'value': '300', 'selected': dpi !== '600' ? true : null }, '300 dpi（推荐）'),
-					E('option', { 'value': '600', 'selected': dpi === '600' ? true : null }, '600 dpi（约 4 倍数据）')
-				]), '修改后 iPhone 发送的 URF 分辨率会同步变化。'),
-				field('打印机 URI', 'ap-printer-uri',
-					E('input', { 'id': 'ap-printer-uri', 'class': 'cbi-input-text', 'value': cfg('printer_uri') }),
-					'必须是 ipps:// 地址，后端使用 TLS 发送 PWG。'),
-				field('CUPS 队列名', 'ap-queue',
-					E('input', { 'id': 'ap-queue', 'class': 'cbi-input-text', 'value': cfg('queue_name') }),
-					'队列不存在时会用内置 PPD 自动创建。'),
-				field('监听端口', 'ap-port',
-					E('input', { 'id': 'ap-port', 'class': 'cbi-input-text', 'type': 'number', 'min': '1', 'max': '65535', 'value': cfg('listen_port') }),
-					'默认 6310；改动后 iPhone 可能需要重新识别打印机。'),
-				field('服务名称', 'ap-service-name',
-					E('input', { 'id': 'ap-service-name', 'class': 'cbi-input-text', 'value': cfg('service_name') }),
-					'与 UUID 一起决定 iPhone 里显示的名称。'),
-				field('备注', 'ap-note',
-					E('input', { 'id': 'ap-note', 'class': 'cbi-input-text', 'value': cfg('note'), 'placeholder': '留空自动生成“AirPrint 300dpi ...”' }),
-					'显示在 iPhone 打印机详情里。'),
-				field('历史保留条数', 'ap-history-max',
-					E('input', { 'id': 'ap-history-max', 'class': 'cbi-input-text', 'type': 'number', 'min': '10', 'max': '2000', 'value': cfg('history_max') }),
-					'写入 /var/log/airprint/jobs.jsonl。')
-			]),
-			E('div', { 'class': 'ap-grid', 'style': 'margin-top:12px' }, [
-				field('推送地址', 'ap-notify-url',
-					E('input', { 'id': 'ap-notify-url', 'class': 'cbi-input-text', 'value': cfg('notify_url'), 'placeholder': 'https://api.day.app/KEY 或 https://ntfy.sh/TOPIC' }),
-					'留空关闭推送。'),
-				field('推送类型', 'ap-notify-kind',
-					E('select', { 'id': 'ap-notify-kind', 'class': 'cbi-input-select' }, [
-						E('option', { 'value': 'auto', 'selected': kind === 'auto' ? true : null }, '自动识别（Bark / ntfy）'),
-						E('option', { 'value': 'bark', 'selected': kind === 'bark' ? true : null }, 'Bark'),
-						E('option', { 'value': 'ntfy', 'selected': kind === 'ntfy' ? true : null }, 'ntfy'),
-						E('option', { 'value': 'generic', 'selected': kind === 'generic' ? true : null }, '通用 JSON')
-					]), 'auto：地址包含 api.day.app 时用 Bark，否则用 ntfy。')
-			]),
-			E('div', { 'class': 'ap-flags' }, [
-				E('span', { 'class': 'ap-label' }, '推送事件：')
-			].concat(EVENT_LABELS.map(function(item) {
-				return checkbox('ap-ev-' + item[0], item[1], events.indexOf(item[0]) >= 0);
-			}))),
-			E('details', { 'style': 'margin-top:12px' }, [
-				E('summary', {}, '高级'),
-				E('div', { 'class': 'ap-grid', 'style': 'margin-top:10px' }, [
-					field('服务 UUID', 'ap-uuid',
-						E('input', { 'id': 'ap-uuid', 'class': 'cbi-input-text', 'value': cfg('service_uuid') }),
-						'一般不要改。改动会让 iPhone 把它当成新的打印机。')
-				])
-			]),
-			E('div', { 'class': 'ap-actions' }, [
-				applyBtn,
-				E('span', { 'class': 'ap-help' }, '配置保存在 /etc/config/airprint；APK 升级不会覆盖。')
-			])
-		]);
+		var o;
+		o = s.option(form.Flag, 'enabled', '启用 AirPrint 打印桥');
+		o.default = o.enabled;
+		o.rmempty = false;
+		o = s.option(form.Flag, 'auto_recover', '队列停止时自动恢复');
+		o.default = o.enabled;
+		o = s.option(form.Flag, 'offline_guard', '打印机离线时拦截任务');
+		o.default = o.enabled;
+		o = s.option(form.Flag, 'debug', '调试日志');
+		o.default = o.disabled;
+
+		o = s.option(form.ListValue, 'dpi', '打印分辨率',
+			'修改后 iPhone 发送的 URF 分辨率会同步变化。');
+		o.value('300', '300 dpi（推荐）');
+		o.value('600', '600 dpi（约 4 倍数据）');
+
+		o = s.option(form.Value, 'printer_uri', '打印机 URI',
+			'必须是 ipps:// 地址，后端使用 TLS 发送 PWG。');
+		o.placeholder = 'ipps://192.168.31.6:631/ipp/print';
+
+		o = s.option(form.Value, 'queue_name', 'CUPS 队列名',
+			'队列不存在时会用内置 PPD 自动创建。');
+		o.placeholder = 'EPSON_L3250';
+
+		o = s.option(form.Value, 'listen_port', '监听端口',
+			'默认 6310；改动后 iPhone 可能需要重新识别打印机。');
+		o.datatype = 'port';
+		o.placeholder = '6310';
+
+		o = s.option(form.Value, 'service_name', '服务名称',
+			'与 UUID 一起决定 iPhone 里显示的名称。');
+		o.placeholder = 'EPSON L3250 Series';
+
+		o = s.option(form.Value, 'note', '备注',
+			'显示在 iPhone 打印机详情里；留空自动生成。');
+
+		o = s.option(form.Value, 'history_max', '历史保留条数',
+			'写入 /var/log/airprint/jobs.jsonl。');
+		o.datatype = 'range(10,2000)';
+		o.placeholder = '200';
+
+		o = s.option(form.Value, 'notify_url', '推送地址', '留空关闭推送。');
+		o.placeholder = 'https://api.day.app/KEY 或 https://ntfy.sh/TOPIC';
+
+		o = s.option(form.ListValue, 'notify_kind', '推送类型',
+			'auto：地址包含 api.day.app 时用 Bark，否则用 ntfy。');
+		o.value('auto', '自动识别（Bark / ntfy）');
+		o.value('bark', 'Bark');
+		o.value('ntfy', 'ntfy');
+		o.value('generic', '通用 JSON');
+
+		o = s.option(form.Value, 'notify_events', '推送事件',
+			'逗号分隔：start,complete,error,recover');
+		o.placeholder = 'start,complete,error,recover';
+
+		o = s.option(form.Value, 'service_uuid', '服务 UUID',
+			'一般不要改；改动会让 iPhone 把它当成新的打印机。');
+
+		return m.render();
 	},
 
 	setBadge: function(level, text) {
@@ -576,87 +578,5 @@ return view.extend({
 				} }, '确定清空')
 			])
 		]);
-	},
-
-	handleApply: function(ev) {
-		var button = ev.currentTarget;
-		var fields = {
-			enabled: fc('ap-enabled'),
-			dpi: fv('ap-dpi'),
-			printer_uri: fv('ap-printer-uri'),
-			queue_name: fv('ap-queue'),
-			listen_port: fv('ap-port'),
-			service_name: fv('ap-service-name'),
-			note: fv('ap-note'),
-			service_uuid: fv('ap-uuid'),
-			auto_recover: fc('ap-auto-recover'),
-			offline_guard: fc('ap-offline-guard'),
-			notify_url: fv('ap-notify-url'),
-			notify_kind: fv('ap-notify-kind'),
-			notify_events: EVENT_LABELS.filter(function(item) {
-				var node = document.getElementById('ap-ev-' + item[0]);
-				return node && node.checked;
-			}).map(function(item) { return item[0]; }).join(','),
-			history_max: fv('ap-history-max'),
-			debug: fc('ap-debug')
-		};
-
-		var errors = [];
-		var port = parseInt(fields.listen_port, 10);
-		var historyMax = parseInt(fields.history_max, 10);
-		if (fields.enabled === '1') {
-			if (!/^ipps:\/\/.+/.test(fields.printer_uri))
-				errors.push('打印机 URI 必须是 ipps:// 地址');
-			if (!fields.queue_name)
-				errors.push('CUPS 队列名不能为空');
-			if (!fields.service_name)
-				errors.push('服务名称不能为空');
-			if (!(port >= 1 && port <= 65535))
-				errors.push('监听端口必须在 1-65535 之间');
-			if (fields.notify_url && !/^https?:\/\/.+/.test(fields.notify_url))
-				errors.push('推送地址必须是 http(s):// 地址');
-		}
-		if (fields.dpi !== '300' && fields.dpi !== '600')
-			errors.push('分辨率只能是 300 或 600');
-		if (!(historyMax >= 10 && historyMax <= 2000))
-			errors.push('历史保留条数必须在 10-2000 之间');
-		if (fields.service_uuid && !/^[0-9a-fA-F-]{8,}$/.test(fields.service_uuid))
-			errors.push('服务 UUID 格式不正确');
-		if (errors.length) {
-			ui.addNotification(null, E('div', {}, errors.map(function(text) {
-				return E('p', {}, text);
-			})), 'error');
-			return;
-		}
-
-		var self = this;
-		button.disabled = true;
-		var oldText = button.textContent;
-		button.textContent = '应用中…';
-		return uci.load('airprint').then(function() {
-			Object.keys(fields).forEach(function(key) {
-				uci.set('airprint', 'main', key, fields[key]);
-			});
-			return uci.save();
-		}).then(function() {
-			return uci.apply().catch(function() { return null; });
-		}).then(function() {
-			return fs.exec('/usr/sbin/airprint-setup', [ 'apply' ]);
-		}).then(function(res) {
-			if (res && res.code !== 0)
-				throw new Error((res.stderr || res.stdout || 'apply failed').trim());
-			self.enabled = fields.enabled === '1';
-			ui.addNotification(null, E('p', {}, self.enabled ? '配置已保存并应用' : 'AirPrint 打印桥已停用'), 'info');
-			setTimeout(function() { self.refresh(); }, 1500);
-		}).catch(function(err) {
-			ui.addNotification(null, E('p', {}, '应用失败：' + (err.message || err)), 'error');
-		}).finally(function() {
-			button.disabled = false;
-			button.textContent = oldText;
-		});
-	},
-
-	handleSave: null,
-	handleSaveApply: null,
-	handleReset: null
+	}
 });

@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
+
+start_service() {
+	return 0
+}
+
+reload_service() {
+	/usr/sbin/ontaccess-setup apply
+}
+
+service_triggers() {
+	procd_add_reload_trigger ontaccess
+}

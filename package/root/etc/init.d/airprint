@@ -16,6 +16,8 @@ start_service() {
 	/usr/sbin/airprint-setup sync-cups >/dev/null 2>&1
 	procd_open_instance
 	procd_set_param command /usr/sbin/airprint-proxy
+	# makes procd restart the proxy when uci commits a new config
+	procd_set_param env AIRPRINT_CONFIG_HASH="$(md5sum /etc/config/airprint 2>/dev/null | cut -d' ' -f1)"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 0
 	procd_set_param stderr 1
@@ -24,5 +26,10 @@ start_service() {
 }
 
 reload_service() {
-	/usr/sbin/airprint-setup apply
+	/usr/sbin/airprint-setup apply --no-restart
+	setsid sh -c 'sleep 2; /etc/init.d/airprint start' >/dev/null 2>&1 &
+}
+
+service_triggers() {
+	procd_add_reload_trigger airprint
 }

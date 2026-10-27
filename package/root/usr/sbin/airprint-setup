@@ -126,10 +126,11 @@ def sync_cups():
     return 0
 
 
-def apply():
+def apply(no_restart=False):
     cfg = common.load_config()
     if str(cfg.get("enabled", "1")).strip() == "0":
-        run([INIT, "stop"], timeout=20)
+        if not no_restart:
+            run([INIT, "stop"], timeout=20)
         run([AVAHI, "remove"], timeout=20)
         print("airprint disabled; Avahi record removed")
         return 0
@@ -137,7 +138,10 @@ def apply():
     if avahi.returncode != 0:
         print("avahi sync failed", file=sys.stderr)
     rc = sync_cups()
-    run([INIT, "restart"], timeout=20)
+    # A procd reload trigger blocks service updates until the script exits,
+    # so the init script restarts the instance afterwards instead.
+    if not no_restart:
+        run([INIT, "restart"], timeout=20)
     print("applied; LuCI: http://%s/cgi-bin/luci/admin/services/airprint" % cfg_ip())
     return rc
 
@@ -180,6 +184,7 @@ def chown_root():
              "/www/luci-static/resources/view/airprint",
              "/www/luci-static/resources/view/ontaccess",
              "/etc/uci-defaults/91-ontaccess",
+             "/etc/init.d/ontaccess",
              INIT, "/etc/uci-defaults/90-airprint")
     for path in paths:
         if not os.path.exists(path):
@@ -194,7 +199,8 @@ def chown_root():
                 os.chmod(target, 0o755 if os.access(target, os.X_OK) else 0o644)
             except OSError:
                 pass
-    for target in (INIT, "/etc/uci-defaults/90-airprint"):
+    for target in (INIT, "/etc/init.d/ontaccess",
+                   "/etc/uci-defaults/90-airprint", "/etc/uci-defaults/91-ontaccess"):
         try:
             os.chmod(target, 0o755)
         except OSError:
@@ -212,6 +218,7 @@ def postinstall():
         run([INIT, "stop"])
         run([INIT, "disable"])
     replace_apk_new(INIT)
+    replace_apk_new("/etc/init.d/ontaccess")
     replace_apk_new("/etc/uci-defaults/90-airprint")
     replace_apk_new("/etc/uci-defaults/91-ontaccess")
     chown_root()
@@ -240,12 +247,18 @@ def postinstall():
         run(["/usr/sbin/ontaccess-setup", "init"])
         run(["/usr/sbin/ontaccess-setup", "apply"], timeout=60)
     run([INIT, "enable"])
+    if os.path.exists("/etc/init.d/ontaccess"):
+        run(["/etc/init.d/ontaccess", "enable"])
+        run(["/etc/init.d/ontaccess", "start"])
     return apply()
 
 
 def deinstall():
     run([INIT, "stop"])
     run([INIT, "disable"])
+    if os.path.exists("/etc/init.d/ontaccess"):
+        run(["/etc/init.d/ontaccess", "stop"])
+        run(["/etc/init.d/ontaccess", "disable"])
     if os.path.exists("/usr/sbin/ontaccess-setup"):
         run(["/usr/sbin/ontaccess-setup", "disable"], timeout=60)
     run([AVAHI, "remove"])
@@ -294,7 +307,7 @@ def cancel_jobs():
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "apply"
     if action == "apply":
-        return apply()
+        return apply(no_restart="--no-restart" in sys.argv[2:])
     if action == "sync-cups":
         return sync_cups()
     if action == "check":

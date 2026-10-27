@@ -3,13 +3,23 @@
 		"description": "ONT management access helper",
 		"read": {
 			"file": {
-				"/usr/sbin/ontaccess-setup": [ "exec" ]
-			}
+				"/usr/sbin/ontaccess-setup": [
+					"exec"
+				]
+			},
+			"uci": [
+				"ontaccess"
+			]
 		},
 		"write": {
 			"file": {
-				"/usr/sbin/ontaccess-setup": [ "exec" ]
-			}
+				"/usr/sbin/ontaccess-setup": [
+					"exec"
+				]
+			},
+			"uci": [
+				"ontaccess"
+			]
 		}
 	}
 }

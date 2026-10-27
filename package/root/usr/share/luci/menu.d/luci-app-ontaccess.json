@@ -1,5 +1,5 @@
 {
-	"admin/network/ontaccess": {
+	"admin/services/ontaccess": {
 		"title": "光猫管理入口",
 		"order": 60,
 		"action": {
@@ -7,7 +7,9 @@
 			"path": "ontaccess/overview"
 		},
 		"depends": {
-			"acl": [ "luci-app-ontaccess" ]
+			"acl": [
+				"luci-app-ontaccess"
+			]
 		}
 	}
 }

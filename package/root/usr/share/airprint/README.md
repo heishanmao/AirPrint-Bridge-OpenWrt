@@ -5,7 +5,7 @@ iPhone AirPrint → CUPS → EPSON L3250，带能力代理、任务历史、离�
 ## 地址
 
 - LuCI：`服务 → AirPrint 打印桥`（状态 + 配置）
-- LuCI：`网络 → 光猫管理入口`（可选的 LAN→上游光猫访问）
+- LuCI：`服务 → 光猫管理入口`（可选的 LAN→上游光猫访问）
 - 状态 JSON：`http://192.168.31.1:6310/status.json`
 
 ## 常用命令
