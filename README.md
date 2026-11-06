@@ -82,7 +82,7 @@ LogLevel warn
 3. 从 [Releases](https://github.com/heishanmao/AirPrint-Bridge-OpenWrt/releases) 下载 APK，上传到路由器后安装：
 
 ```sh
-apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r13.apk
+apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r14.apk
 ```
 
 4. 修改 `/etc/config/airprint`（至少改这几项）：
@@ -164,7 +164,7 @@ cd AirPrint-Bridge-OpenWrt
 sh filter/build.sh                      # 默认 aarch64-linux-musl
 
 # 2) 打包 APK（会顺带交叉编译 Go 代理）
-APK_STATIC=/path/to/apk.static VERSION=1.1.0-r13 sh package/build-apk.sh
+APK_STATIC=/path/to/apk.static VERSION=1.1.0-r14 sh package/build-apk.sh
 ```
 
 产物：`package/build/airprint-bridge-<VERSION>.apk`。
