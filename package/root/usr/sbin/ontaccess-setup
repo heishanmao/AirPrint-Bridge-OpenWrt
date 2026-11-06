@@ -1,9 +1,11 @@
 #!/usr/bin/python3
 """Publish the upstream ONT management UI to the LAN.
 
-Adds a static address on the WAN port, a masquerading firewall zone and an
-optional DHCP classless route (option 121), so LAN clients can open the
-optical modem's web UI without touching the PPPoE session.
+Adds a static address on the WAN port, a masquerading firewall zone and a
+DNAT redirect (LAN :8080 -> ONT :80), so LAN clients can open the optical
+modem's web UI without touching the PPPoE session. No DHCP options are
+pushed to clients; leftover option 121 routes from older versions are
+removed.
 """
 import ipaddress
 import json
@@ -17,6 +19,8 @@ TAG = "ontaccess"
 IFACE = "ont"
 ZONE = "ont"
 FWD = "ontfwd"
+WEB = "ontweb"
+WEB_PORT = "8080"
 WAN_DEV = "wan"
 LAN_IF = "lan"
 
@@ -25,7 +29,6 @@ DEFAULTS = {
     "ont_ip": "192.168.1.1",
     "prefix": "24",
     "local_ip": "192.168.1.2",
-    "dhcp_route": "1",
 }
 
 
@@ -62,13 +65,6 @@ def uci_commit(name):
                            "uci commit %s failed" % name)
 
 
-def uci_add_list(key, value):
-    res = run(["uci", "add_list", "%s=%s" % (key, value)], 8)
-    if res.returncode != 0:
-        raise RuntimeError(res.stderr.decode("utf-8", "replace").strip() or
-                           "uci add_list %s failed" % key)
-
-
 def uci_del_list(key, value):
     run(["uci", "-q", "del_list", "%s=%s" % (key, value)], 8)
 
@@ -88,7 +84,6 @@ def load_cfg():
             "ont_ip": DEFAULTS["ont_ip"],
             "prefix": DEFAULTS["prefix"],
             "local_ip": DEFAULTS["local_ip"],
-            "dhcp_route": True,
         }
     return {
         "exists": True,
@@ -96,7 +91,6 @@ def load_cfg():
         "ont_ip": uci_get("ontaccess.main.ont_ip", DEFAULTS["ont_ip"]),
         "prefix": uci_get("ontaccess.main.prefix", DEFAULTS["prefix"]),
         "local_ip": uci_get("ontaccess.main.local_ip", DEFAULTS["local_ip"]),
-        "dhcp_route": truthy(uci_get("ontaccess.main.dhcp_route", "1"), True),
     }
 
 
@@ -145,8 +139,24 @@ def resolve(cfg):
     return net, local
 
 
-def route_option(net):
-    return "121,%s,%s" % (net.with_prefixlen, lan_address())
+def legacy_route_entries(net):
+    raw = uci_get("dhcp.lan.dhcp_option", "") or ""
+    found = []
+    for item in raw.replace("\n", " ").split():
+        if not item.startswith("121,"):
+            continue
+        parts = item.split(",")
+        if len(parts) >= 3 and parts[1] == net.with_prefixlen:
+            found.append(item)
+    return found
+
+
+def drop_legacy_route(net):
+    """Remove option 121 entries pushed by older versions of this package."""
+    found = legacy_route_entries(net)
+    for item in found:
+        uci_del_list("dhcp.lan.dhcp_option", item)
+    return bool(found)
 
 
 def forwarding_sections():
@@ -159,11 +169,14 @@ def forwarding_sections():
 
 
 def cleanup_forwarding():
+    removed = False
     for section in forwarding_sections():
         if section == "firewall." + FWD:
             continue
         if uci_get(section + ".src") == LAN_IF and uci_get(section + ".dest") == ZONE:
             uci_delete(section)
+            removed = True
+    return removed
 
 
 def ensure_config():
@@ -184,7 +197,6 @@ def write_cfg(cfg):
     uci_set("ontaccess.main.ont_ip", cfg["ont_ip"])
     uci_set("ontaccess.main.prefix", str(cfg["prefix"]))
     uci_set("ontaccess.main.local_ip", cfg["local_ip"])
-    uci_set("ontaccess.main.dhcp_route", "1" if cfg["dhcp_route"] else "0")
     uci_commit("ontaccess")
 
 
@@ -212,36 +224,46 @@ def apply_cfg(cfg):
     uci_set("firewall." + FWD, "forwarding")
     uci_set("firewall.%s.src" % FWD, LAN_IF)
     uci_set("firewall.%s.dest" % FWD, ZONE)
+    uci_set("firewall." + WEB, "redirect")
+    uci_set("firewall.%s.name" % WEB, "ont-web")
+    uci_set("firewall.%s.src" % WEB, LAN_IF)
+    uci_set("firewall.%s.proto" % WEB, "tcp")
+    uci_set("firewall.%s.src_dport" % WEB, WEB_PORT)
+    uci_set("firewall.%s.dest" % WEB, ZONE)
+    uci_set("firewall.%s.dest_ip" % WEB, cfg["ont_ip"])
+    uci_set("firewall.%s.dest_port" % WEB, "80")
+    uci_set("firewall.%s.target" % WEB, "DNAT")
     uci_commit("firewall")
     run(["/etc/init.d/firewall", "reload"], 30)
 
-    if uci_get("dhcp.lan") is not None:
-        option = route_option(net)
-        uci_del_list("dhcp.lan.dhcp_option", option)
-        if cfg["dhcp_route"]:
-            uci_add_list("dhcp.lan.dhcp_option", option)
+    if drop_legacy_route(net):
         uci_commit("dhcp")
         run(["/etc/init.d/dnsmasq", "restart"], 20)
     return net, local
 
 
 def disable_cfg(cfg):
-    run(["ifdown", IFACE], 20)
-    uci_delete("network." + IFACE)
-    uci_delete("firewall." + ZONE)
-    uci_delete("firewall." + FWD)
-    cleanup_forwarding()
+    if uci_get("network." + IFACE) is not None:
+        run(["ifdown", IFACE], 20)
+        uci_delete("network." + IFACE)
+        uci_commit("network")
+    removed = False
+    for name in (ZONE, FWD, WEB):
+        if uci_get("firewall." + name) is not None:
+            uci_delete("firewall." + name)
+            removed = True
+    if cleanup_forwarding():
+        removed = True
+    if removed:
+        uci_commit("firewall")
+        run(["/etc/init.d/firewall", "reload"], 30)
     try:
         net, _ = resolve(cfg)
-        if uci_get("dhcp.lan") is not None:
-            uci_del_list("dhcp.lan.dhcp_option", route_option(net))
+        if drop_legacy_route(net):
+            uci_commit("dhcp")
+            run(["/etc/init.d/dnsmasq", "restart"], 20)
     except ValueError:
         pass
-    uci_commit("network")
-    uci_commit("firewall")
-    uci_commit("dhcp")
-    run(["/etc/init.d/firewall", "reload"], 30)
-    run(["/etc/init.d/dnsmasq", "restart"], 20)
 
 
 def http_probe(host):
@@ -272,20 +294,24 @@ def status():
         "ont_ip": cfg["ont_ip"],
         "prefix": cfg["prefix"],
         "local_ip": cfg["local_ip"],
-        "dhcp_route": cfg["dhcp_route"],
         "lan_ip": lan_address(),
+        "web_port": WEB_PORT,
+        "web_url": "http://%s:%s" % (lan_address(), WEB_PORT),
         "configured": uci_get("network." + IFACE) is not None,
         "forwarding": (uci_get("firewall.%s.src" % FWD) == LAN_IF and
                        uci_get("firewall.%s.dest" % FWD) == ZONE),
         "masq": uci_get("firewall.%s.masq" % ZONE) == "1",
+        "web": (uci_get("firewall.%s.src" % WEB) == LAN_IF and
+                uci_get("firewall.%s.src_dport" % WEB) == WEB_PORT and
+                uci_get("firewall.%s.dest_ip" % WEB) == cfg["ont_ip"] and
+                uci_get("firewall.%s.dest_port" % WEB) == "80" and
+                uci_get("firewall.%s.target" % WEB) == "DNAT"),
     }
     try:
         net, local = resolve(cfg)
         out["local_ip"] = str(local)
         out["network"] = net.with_prefixlen
-        option = route_option(net)
-        out["option"] = option
-        out["route_pushed"] = option in (uci_get("dhcp.lan.dhcp_option", "") or "").splitlines()
+        out["legacy_route"] = bool(legacy_route_entries(net))
     except ValueError as exc:
         out["error"] = str(exc)
         net = None
@@ -305,7 +331,9 @@ def status():
         out["reachable"] = False
         out["http"] = False
         out["ms"] = None
-        out["route_pushed"] = False
+        out["legacy_route"] = False
+    out["access"] = bool(out["enabled"] and out["configured"] and out["forwarding"] and
+                         out["masq"] and out["web"] and out["reachable"] and out["http"])
     return out
 
 
@@ -347,14 +375,13 @@ def main(argv):
             print(json.dumps(out, ensure_ascii=False))
             return 0
         if command == "set":
-            if len(argv) < 7:
-                raise ValueError("用法：set <enabled> <ont_ip> <prefix> <local_ip> <dhcp_route>")
+            if len(argv) < 6:
+                raise ValueError("用法：set <enabled> <ont_ip> <prefix> <local_ip>")
             cfg = {
                 "enabled": argv[2] == "1",
                 "ont_ip": argv[3].strip(),
                 "prefix": argv[4].strip(),
                 "local_ip": argv[5].strip(),
-                "dhcp_route": argv[6] == "1",
             }
             if cfg["enabled"]:
                 resolve(cfg)

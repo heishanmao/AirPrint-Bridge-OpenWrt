@@ -6,6 +6,5 @@ config ontaccess 'main'
 	option ont_ip '192.168.1.1'
 	option prefix '24'
 	option local_ip '192.168.1.2'
-	option dhcp_route '1'
 EOF
 exit 0

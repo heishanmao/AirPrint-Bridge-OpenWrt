@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the OpenWrt/ImmortalWrt APK (apk-tools 3.x).
 #
-#   VERSION=1.1.0-r12 sh package/build-apk.sh
+#   VERSION=1.1.0-r13 sh package/build-apk.sh
 #   ARCH=arm_cortex-a7 GOARCH=arm ZIG_TARGET=arm-linux-musleabihf \
 #     APK=/path/to/apk.static sh package/build-apk.sh
 #
@@ -9,7 +9,7 @@
 # with mkpkg support.
 set -eu
 
-VERSION=${VERSION:-1.1.0-r12}
+VERSION=${VERSION:-1.1.0-r13}
 ARCH=${ARCH:-aarch64_cortex-a53}
 GOARCH=${GOARCH:-arm64}
 GOARM=${GOARM:-}

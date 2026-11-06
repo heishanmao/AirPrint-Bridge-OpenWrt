@@ -82,7 +82,7 @@ LogLevel warn
 3. 从 [Releases](https://github.com/heishanmao/AirPrint-Bridge-OpenWrt/releases) 下载 APK，上传到路由器后安装：
 
 ```sh
-apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r12.apk
+apk add --allow-untrusted --no-network --force-non-repository /tmp/airprint-bridge-1.1.0-r13.apk
 ```
 
 4. 修改 `/etc/config/airprint`（至少改这几项）：
@@ -113,15 +113,15 @@ airprint-setup check
 
 如果路由器上游是**桥接**光猫（PPPoE 由路由器拨号），光猫的管理页通常仍在 `192.168.1.1`，只是局域网无法路由到它。这个模块在 WAN 口加一个同网段地址，并用 SNAT 让局域网访问：
 
-- LuCI：`服务 → 光猫管理入口`，可启用/停用、修改光猫地址、子网前缀、本机地址，以及是否通过 DHCP option 121 推送路由。
+- LuCI：`服务 → 光猫管理入口`，一个开关控制是否允许局域网访问光猫，可修改光猫地址、子网前缀、本机地址。局域网入口为 `http://<路由器IP>:8080`。
 - 命令行：`ontaccess-setup status | apply | disable`，配置在 `/etc/config/ontaccess`。
-- 默认**关闭**；启用时创建 `network.ont`（`wan` 上的静态地址）、`firewall.ont`（`masq`）、`lan → ont` 转发和 DHCP option 121。停用会把这些配置移除。
+- 默认**关闭**；启用时创建 `network.ont`（`wan` 上的静态地址）、`firewall.ont`（`masq`）、`lan → ont` 转发和 `8080 → 光猫:80` 的 DNAT 映射。停用只移除这些配置，拨号和上网不受影响。
 
 注意：
 
 - 需要光猫在链路上响应该管理地址；桥接后管理 VLAN 不通的机型不适用。
 - 所有局域网设备共用同一个源地址，光猫通常只保留一个管理会话，多台设备同时登录可能互相踢下线。
-- 客户端需要重新获取 DHCP 租约才能拿到路由；VPN/代理接管默认路由的设备可能需要手动加一条到光猫网段的路由。
+- 客户端不需要额外路由，直接用 `http://<路由器IP>:8080` 打开光猫；旧版本下发过的 DHCP option 121 会在启用或停用时自动清理。
 - 只允许局域网访问，不会把光猫暴露到 WAN。
 
 ## 配置项
@@ -164,7 +164,7 @@ cd AirPrint-Bridge-OpenWrt
 sh filter/build.sh                      # 默认 aarch64-linux-musl
 
 # 2) 打包 APK（会顺带交叉编译 Go 代理）
-APK_STATIC=/path/to/apk.static VERSION=1.1.0-r12 sh package/build-apk.sh
+APK_STATIC=/path/to/apk.static VERSION=1.1.0-r13 sh package/build-apk.sh
 ```
 
 产物：`package/build/airprint-bridge-<VERSION>.apk`。

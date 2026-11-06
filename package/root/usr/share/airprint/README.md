@@ -40,11 +40,11 @@ airprint-setup apply
 
 ### 光猫管理入口
 
-配置文件 `/etc/config/ontaccess`，默认关闭。启用后在 `wan` 上增加管理地址、防火墙 SNAT 和 DHCP option 121，让局域网直接打开上游光猫的网页；PPPoE 不受影响。所有设备共用同一个源地址，光猫可能只保留一个管理会话。
+配置文件 `/etc/config/ontaccess`，默认关闭。启用后在 `wan` 上增加管理地址、防火墙 SNAT 和 8080→光猫 80 的 DNAT 映射，局域网用 `http://<路由器IP>:8080` 打开上游光猫；PPPoE 不受影响，也不再向客户端推送 DHCP 路由。所有设备共用同一个源地址，光猫可能只保留一个管理会话。
 
 ```sh
-ontaccess-setup set 1 192.168.1.1 24 192.168.1.2 1   # 启用：光猫IP 前缀 本机地址 推送路由
-ontaccess-setup set 0 192.168.1.1 24 192.168.1.2 1   # 关闭并移除相关配置
+ontaccess-setup set 1 192.168.1.1 24 192.168.1.2   # 启用：光猫IP 前缀 本机地址
+ontaccess-setup set 0 192.168.1.1 24 192.168.1.2   # 关闭并移除相关配置
 ```
 
 ## 升级

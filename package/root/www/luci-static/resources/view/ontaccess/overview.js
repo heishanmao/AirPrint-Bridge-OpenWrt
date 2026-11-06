@@ -48,12 +48,16 @@ return view.extend({
 
 		var m = new form.Map('ontaccess');
 		this.map = m;
+		var lanHost = data.lan_ip || '192.168.31.1';
+		var webUrl = 'http://' + lanHost + ':8080';
+
 		var s = m.section(form.NamedSection, 'main', 'ontaccess', '设置',
-			'保存后会创建或更新 WAN 管理地址、防火墙规则和 DHCP 路由。PPPoE 拨号方式不变。');
+			'保存后会创建或更新 WAN 管理地址、防火墙规则和 8080 端口映射。PPPoE 拨号方式不变。');
 		s.addremove = false;
 
 		var o;
-		o = s.option(form.Flag, 'enabled', '启用');
+		o = s.option(form.Flag, 'enabled', '允许访问光猫',
+			'开启后可通过 ' + webUrl + ' 打开光猫管理页面；关闭只会移除本功能，不影响拨号和上网。');
 		o.default = o.disabled;
 		o.rmempty = false;
 
@@ -69,16 +73,12 @@ return view.extend({
 		o.datatype = 'ip4addr';
 		o.placeholder = '192.168.1.2';
 
-		o = s.option(form.Flag, 'dhcp_route', '向局域网推送路由',
-			'通过 DHCP option 121 告知客户端如何访问光猫网段；关闭后需要客户端手动添加路由');
-		o.default = o.enabled;
-
 		var mapBox = E('div');
 
 		var page = [
 			E('h2', {}, '光猫管理入口'),
 			E('div', { 'class': 'cbi-map-descr' },
-				'在 WAN 口增加一个管理地址，通过 SNAT 让局域网电脑直接打开上游光猫的网页。PPPoE 拨号方式不变。'),
+				'在 WAN 口增加一个管理地址，并把局域网 8080 端口转发到光猫的管理页面：' + webUrl + '。不需要给客户端下发路由。'),
 			E('div', { 'class': 'oa-head' }, [
 				this.badge,
 				E('span', { 'class': 'oa-spacer' }),
@@ -94,8 +94,9 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '说明'),
 				E('div', { 'class': 'cbi-section-descr' }, [
-					E('p', {}, '所有局域网设备访问光猫时都使用同一个源地址，光猫通常只保留一个管理会话，多台设备同时登录可能互相踢下线。'),
-					E('p', {}, '修改后客户端需要重新获取 DHCP 租约；使用 VPN/代理接管默认路由的设备可能需要额外添加一条到光猫网段的路由。')
+					E('p', {}, '局域网设备统一通过 ' + webUrl + ' 访问光猫，不再向客户端推送 DHCP 路由。'),
+					E('p', {}, '所有设备访问光猫时都使用同一个源地址，光猫通常只保留一个管理会话，多台设备同时登录可能互相踢下线。'),
+					E('p', {}, '关闭开关只会移除管理地址、转发和 8080 映射，PPPoE 拨号与上网不受影响。')
 				])
 			]),
 			E('style', {}, [
@@ -146,8 +147,15 @@ return view.extend({
 		}
 		else if (!data.enabled) {
 			this.notice.className = 'oa-notice info';
-			this.notice.textContent = '未启用：勾选“启用”并点击“保存并应用”后会创建管理接口、防火墙规则和 DHCP 路由。';
+			this.notice.textContent = '未启用：勾选“允许访问光猫”并点击“保存并应用”后，用 ' +
+				(data.web_url || ('http://' + (data.lan_ip || '192.168.31.1') + ':8080')) + ' 访问光猫。';
 		}
+		else if (!data.access) {
+			this.notice.className = 'oa-notice info';
+			this.notice.textContent = '已启用，但访问链路尚未完全生效；请检查下面各项状态。';
+		}
+
+		var webUp = !!(data.web && data.masq && data.forwarding);
 
 		this.statusBox.textContent = '';
 		[
@@ -159,8 +167,8 @@ return view.extend({
 				data.http ? 'HTTP 正常' : '未响应'),
 			pill('NAT / 转发', (data.masq && data.forwarding) ? 'ok' : (data.enabled ? 'bad' : 'warn'),
 				(data.masq && data.forwarding) ? '已配置' : '未配置'),
-			pill('局域网路由', data.route_pushed ? 'ok' : (data.dhcp_route ? (data.enabled ? 'bad' : 'warn') : 'warn'),
-				data.route_pushed ? ((data.network || '') + ' 经 ' + (data.lan_ip || 'LAN')) : (data.dhcp_route ? '未下发' : '已关闭'))
+			pill('局域网入口', webUp ? 'ok' : (data.enabled ? 'bad' : 'warn'),
+				webUp ? (data.web_url || '8080 已转发') : '未配置')
 		].forEach(function(node) {
 			this.statusBox.appendChild(node);
 		}, this);
